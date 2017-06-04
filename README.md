@@ -1,3 +1,6 @@
+# Logs
+* 2017-06-05 Initialize the fork.
+
 # Practical_RL
 A course on reinforcement learning in the wild.
 Taught on-campus in [HSE](https://cs.hse.ru) and [Yandex SDA](https://yandexdataschool.com) (russian) and maintained to be friendly to online students (both english and russian).
