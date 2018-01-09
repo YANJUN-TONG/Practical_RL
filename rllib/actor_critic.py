@@ -7,8 +7,8 @@ from torch.distributions import Categorical
 from .misc import clip_grads, to_var
 
 
-class REINFORCE:
-    '''Implement REINFORCE algorithm.'''
+class ActorCritic:
+    '''Implement Actor-Critic algorithm.'''
 
     def __init__(self, model, gamma=0.99, learning_rate=1.e-3, batch_size=10):
         self.model = model
@@ -18,6 +18,7 @@ class REINFORCE:
         self.batch_size = batch_size
 
         self.log_probs = []
+        self.state_values = []
         self.rewards = []
 
         self.history = []
@@ -29,27 +30,34 @@ class REINFORCE:
     def select_action(self, obs):
         self.model.train()
         state = to_var(torch.Tensor(obs).unsqueeze(0))
-        logits = self.model(state)
+        logits, state_value = self.model(state)
         probs = F.softmax(logits, dim=1)
         m = Categorical(probs)
         action = m.sample()
         log_prob = m.log_prob(action)
-        return action.data[0], log_prob
+        return action.data[0], log_prob, state_value
 
-    def keep_for_policy_grad(self, log_prob, reward):
+    def keep_for_grad(self, log_prob, state_value, reward):
         self.log_probs.append(log_prob)
         self.rewards.append(reward)
+        self.state_values.append(state_value)
 
-    def _accumulate_policy_grad(self):
-        policy_loss = get_policy_loss(self.log_probs, self.rewards, self.gamma)
+    def _accumulate_grad(self):
+        policy_loss, value_loss = get_loss(self.log_probs, self.state_values,
+                                           self.rewards, self.gamma)
 
         self.history.append([sum(self.rewards),  # total_reward
                              len(self.rewards),  # n_round
-                             policy_loss.data[0]])  # train_loss
+                             policy_loss.data[0],  # policy_loss
+                             value_loss.data[0]])  # value_loss
 
-        policy_loss.backward()
+        loss = policy_loss + value_loss
+
+        loss.backward()
+
         del self.log_probs[:]
         del self.rewards[:]
+        del self.state_values[:]
 
     def _train(self):
         clip_grads(self.model, -10, 10)
@@ -57,7 +65,7 @@ class REINFORCE:
         self.optimizer.zero_grad()
 
     def step(self):
-        self._accumulate_policy_grad()
+        self._accumulate_grad()
         episode = self.episode
         if episode > 0 and episode % self.batch_size == 0:
             self._train()
@@ -66,7 +74,7 @@ class REINFORCE:
         self.model.eval()
         state = to_var(torch.Tensor(obs).unsqueeze(0))
         with torch.no_grad():
-            logits = self.model(state)
+            logits, _ = self.model(state)
         _, action = logits.max(dim=1)
         return action.data[0]
 
@@ -86,9 +94,13 @@ def get_normalized_rewards(rewards, gamma):
     return (ret - ret.mean()) / (ret.std() + np.finfo(np.float32).eps)
 
 
-def get_policy_loss(log_probs, rewards, gamma):
-    ret = 0
+def get_loss(log_probs, state_values, rewards, gamma):
+    policy_loss = 0
+    value_loss = 0
     normalized_rewards = get_normalized_rewards(rewards, gamma)
-    for log_prob, reward in zip(log_probs, normalized_rewards):
-        ret -= log_prob * reward  # it's less memory consuming than dot product
-    return ret
+    for log_prob, state_value, reward in zip(log_probs, state_values, normalized_rewards):
+        # it's less memory consuming than dot product
+        policy_loss -= log_prob * (reward - state_value.data[0, 0])
+        value_loss += F.smooth_l1_loss(state_value,
+                                       to_var(torch.Tensor([[reward]])))
+    return policy_loss, value_loss
